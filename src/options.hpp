@@ -45,6 +45,10 @@
 #include <sys/ucred.h>
 #endif
 
+#if defined ZMQ_HAVE_LZ4
+#include "../include/zmq.h"
+#endif
+
 //  Normal base 256 key is 32 bytes
 #define CURVE_KEYSIZE       32
 //  Key encoded using Z85 is 40 bytes
@@ -199,9 +203,9 @@ namespace zmq
         std::string gss_principal;
         std::string gss_service_principal;
 
-	//  Name types GSSAPI principals
-	int gss_principal_nt;
-	int gss_service_principal_nt;
+        //  Name types GSSAPI principals
+        int gss_principal_nt;
+        int gss_service_principal_nt;
 
         //  If true, gss encryption will be disabled
         bool gss_plaintext;
@@ -234,6 +238,18 @@ namespace zmq
         uint64_t vmci_buffer_min_size;
         uint64_t vmci_buffer_max_size;
         int vmci_connect_timeout;
+#       endif
+
+#       if defined ZMQ_HAVE_LZ4
+        // lz4 compressionn level
+        // range: [0,9], where 0 is off
+        int lz4_in;
+        int lz4_out;
+        // minimul payload size that will be compressed
+        // range: >= 1K
+        int lz4_threshhold;
+        // compression statistics
+        lz4_stat_t lz4_stat;
 #       endif
 
         //  When creating a new ZMQ socket, if this option is set the value

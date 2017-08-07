@@ -195,6 +195,11 @@ namespace zmq
         //  Creates new endpoint ID and adds the endpoint to the map.
         void add_endpoint (const char *addr_, own_t *endpoint_, pipe_t *pipe);
 
+#if defined ZMQ_HAVE_LZ4
+        int lz4_compress (msg_t *msg_);
+        int lz4_decompress (msg_t *msg_);
+#endif
+
         //  Map of open endpoints.
         typedef std::pair <own_t *, pipe_t*> endpoint_pipe_t;
         typedef std::multimap <std::string, endpoint_pipe_t> endpoints_t;

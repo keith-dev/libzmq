@@ -97,6 +97,10 @@
 #include "scatter.hpp"
 #include "dgram.hpp"
 
+#if defined ZMQ_HAVE_LZ4
+#include "clock.hpp"
+#include <lz4.h>
+#endif
 
 
 bool zmq::socket_base_t::check_tag ()
@@ -1112,6 +1116,13 @@ int zmq::socket_base_t::send (msg_t *msg_, int flags_)
         return -1;
     }
 
+#if defined ZMQ_HAVE_LZ4
+    rc = lz4_compress (msg_);
+    if (unlikely (rc < 0)) {
+        return -1;
+    }
+#endif
+
     //  Clear any user-visible flags that are set on the message.
     msg_->reset_flags (msg_t::more);
 
@@ -1206,6 +1217,12 @@ int zmq::socket_base_t::recv (msg_t *msg_, int flags_)
     //  If we have the message, return immediately.
     if (rc == 0) {
         extract_flags (msg_);
+#if defined ZMQ_HAVE_LZ4
+        rc = lz4_decompress (msg_);
+        if (unlikely (rc < 0)) {
+            return -1;
+        }
+#endif
         return 0;
     }
 
@@ -1224,7 +1241,12 @@ int zmq::socket_base_t::recv (msg_t *msg_, int flags_)
             return rc;
         }
         extract_flags (msg_);
-
+#if defined ZMQ_HAVE_LZ4
+        rc = lz4_decompress (msg_);
+        if (unlikely (rc < 0)) {
+            return -1;
+        }
+#endif
         return 0;
     }
 
@@ -1259,6 +1281,12 @@ int zmq::socket_base_t::recv (msg_t *msg_, int flags_)
     }
 
     extract_flags (msg_);
+#if defined ZMQ_HAVE_LZ4
+    rc = lz4_decompress (msg_);
+    if (unlikely (rc < 0)) {
+        return -1;
+    }
+#endif
     return 0;
 }
 
@@ -1743,3 +1771,104 @@ void zmq::socket_base_t::stop_monitor (bool send_monitor_stopped_event_)
         monitor_events = 0;
     }
 }
+
+#if defined ZMQ_HAVE_LZ4
+namespace
+{
+    struct lz4_hdr_t
+    {
+        uint32_t raw_size;
+        uint32_t compress_size;
+    };
+}
+
+int zmq::socket_base_t::lz4_compress (msg_t *msg_)
+{
+    if (options.lz4_in && msg_ && (msg_->size() >= static_cast<size_t> (options.lz4_threshhold))) {
+        uint64_t start_time_us = clock_t::now_us ();
+
+        uint32_t raw_size = msg_->size();
+
+        // make a temp buffer to work with--guess an upper limit on the size
+        size_t dstlen = msg_->size() + sizeof (lz4_hdr_t) + 8 + msg_->size()/10;
+        void* dst = malloc (dstlen);
+        if (unlikely (!dst)) {
+            errno = ENOMEM;
+            return -1;
+        }
+
+        int rc = LZ4_compress_fast (
+                static_cast<const char*> (msg_->data ()), (char*) dst + sizeof (lz4_hdr_t),
+                raw_size, dstlen - sizeof (lz4_hdr_t), options.lz4_in);
+        if (unlikely (rc < 0)) {
+            return rc;
+        }
+        const uint32_t compress_size = static_cast<unsigned> (rc);
+
+        lz4_hdr_t* hdr = (lz4_hdr_t*) dst;
+        hdr->raw_size = htonl (raw_size);
+        hdr->compress_size = htonl (compress_size);
+
+        dstlen = rc + sizeof (lz4_hdr_t);
+        dst = realloc (dst, dstlen);
+
+        msg_->close ();
+        rc = msg_->init_size (dstlen);
+        if (unlikely (rc < 0)) {
+            return rc;
+        }
+
+        memcpy (msg_->data(), dst, dstlen);
+        free (dst);
+
+        ++options.lz4_stat.compress.n;
+        options.lz4_stat.compress.in += raw_size;
+        options.lz4_stat.compress.out += compress_size;
+        options.lz4_stat.compress.time_us += clock_t::now_us () - start_time_us;
+    }
+
+    return 0;
+}
+
+int zmq::socket_base_t::lz4_decompress (msg_t *msg_)
+{
+    if (options.lz4_out && msg_ && (msg_->size() >= (sizeof (lz4_hdr_t) + 8))) {
+        int rc;
+        uint64_t start_time_us = clock_t::now_us ();
+
+        lz4_hdr_t* hdr = (lz4_hdr_t*) msg_->data();
+        uint32_t raw_size = ntohl (hdr->raw_size);
+        uint32_t compress_size = ntohl (hdr->compress_size);
+
+        msg_t dst;
+        rc = dst.init_size (raw_size);
+        if (unlikely (rc < 0)) {
+            return rc;
+        }
+
+        rc = LZ4_decompress_safe (
+                static_cast<const char*> (msg_->data ()) + sizeof(lz4_hdr_t), static_cast<char*> (dst.data ()),
+                compress_size, raw_size);
+        if (unlikely (rc == -1)) {
+            errno = EINVAL;
+            return -1;
+        }
+        if (unlikely (rc != static_cast<int> (dst.size()))) {
+            errno = EINVAL;
+            return -1;
+        }
+
+        msg_->close ();
+        msg_->init ();
+        msg_->move (dst);
+        dst.close ();
+
+        ++options.lz4_stat.decompress.n;
+        options.lz4_stat.decompress.in += compress_size;
+        options.lz4_stat.decompress.out += raw_size;
+        options.lz4_stat.decompress.time_us += clock_t::now_us () - start_time_us;
+    }
+
+    return 0;
+}
+#endif

@@ -34,6 +34,12 @@
 #include "err.hpp"
 #include "macros.hpp"
 
+#if defined ZMQ_HAVE_LZ4
+#define LZ4_MIN_COMPRESSION_LEVEL 0
+#define LZ4_MAX_COMPRESSION_LEVEL 9
+#define LZ4_MIN_THRESHHOLD 128
+#endif
+
 zmq::options_t::options_t () :
     sndhwm (1000),
     rcvhwm (1000),
@@ -79,6 +85,11 @@ zmq::options_t::options_t () :
     heartbeat_ttl (0),
     heartbeat_interval (0),
     heartbeat_timeout (-1),
+#if defined ZMQ_HAVE_LZ4
+    lz4_in (0),
+    lz4_out (0),
+    lz4_threshhold (LZ4_MIN_THRESHHOLD),
+#endif
     use_fd (-1)
 {
     memset (curve_public_key, 0, CURVE_KEYSIZE);
@@ -89,6 +100,9 @@ zmq::options_t::options_t () :
     vmci_buffer_min_size = 0;
     vmci_buffer_max_size = 0;
     vmci_connect_timeout = -1;
+#endif
+#if defined ZMQ_HAVE_LZ4
+    memset (&lz4_stat, 0, sizeof (lz4_stat_t));
 #endif
 }
 
@@ -598,6 +612,45 @@ int zmq::options_t::setsockopt (int option_, const void *optval_,
             break;
 #endif
 
+#ifdef ZMQ_HAVE_LZ4
+        case ZMQ_SNDLZ4:
+            if (optvallen_ == sizeof (int)) {
+                int value = *((int*) optval_);
+                if (LZ4_MIN_COMPRESSION_LEVEL <= value && value <= LZ4_MAX_COMPRESSION_LEVEL) {
+                    lz4_out = value;
+                    return 0;
+                }
+            }
+            break;
+
+        case ZMQ_RCVLZ4:
+            if (optvallen_ == sizeof (int)) {
+                int value = *((int*) optval_);
+                if (LZ4_MIN_COMPRESSION_LEVEL <= value && value <= LZ4_MAX_COMPRESSION_LEVEL) {
+                    lz4_in = value;
+                    return 0;
+                }
+            }
+            break;
+
+        case ZMQ_LZ4_THRESHHOLD:
+            if (optvallen_ == sizeof (int)) {
+                int value = *((int*) optval_);
+                if (LZ4_MIN_THRESHHOLD <= lz4_threshhold) {
+                    lz4_threshhold = value;
+                    return 0;
+                }
+            }
+            break;
+
+        case ZMQ_LZ4_STAT_RESET:
+            if (optvallen_ == sizeof (int)) {
+                memset (&lz4_stat, 0, sizeof (lz4_stat));
+                return 0;
+            }
+            break;
+#endif
+
         case ZMQ_USE_FD:
             if (is_int && value >= -1) {
                 use_fd = value;
@@ -1013,6 +1066,36 @@ int zmq::options_t::getsockopt (int option_, void *optval_, size_t *optvallen_) 
                 return 0;
             }
             break;
+
+#ifdef ZMQ_HAVE_LZ4
+        case ZMQ_SNDLZ4:
+            if (is_int) {
+                *value = lz4_out;
+                return 0;
+            }
+            break;
+
+        case ZMQ_RCVLZ4:
+            if (is_int) {
+                *value = lz4_in;
+                return 0;
+            }
+            break;
+
+        case ZMQ_LZ4_THRESHHOLD:
+            if (is_int) {
+                *value = lz4_threshhold;
+                return 0;
+            }
+            break;
+
+        case ZMQ_LZ4_STAT:
+            if (*optvallen_ == sizeof (lz4_stat)) {
+                *(lz4_stat_t*) value = lz4_stat;
+                return 0;
+            }
+            break;
+#endif
 
         case ZMQ_USE_FD:
             if (is_int) {

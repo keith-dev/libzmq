@@ -146,6 +146,7 @@ namespace zmq
         enum type_t
         {
             type_min = 101,
+
             //  VSM messages store the content in the message itself
             type_vsm = 101,
             //  LMSG messages store the content in malloc-ed memory
@@ -154,13 +155,10 @@ namespace zmq
             type_delimiter = 103,
             //  CMSG messages point to constant data
             type_cmsg = 104,
-
             // zero-copy LMSG message for v2_decoder
             type_zclmsg = 105,
-
             //  Join message for radio_dish
             type_join = 106,
-
             //  Leave message for radio_dish
             type_leave = 107,
 

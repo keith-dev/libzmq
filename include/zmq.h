@@ -368,6 +368,31 @@ ZMQ_EXPORT const char *zmq_msg_gets (const zmq_msg_t *msg, const char *property)
 #define ZMQ_VMCI_BUFFER_MAX_SIZE 87
 #define ZMQ_VMCI_CONNECT_TIMEOUT 88
 #define ZMQ_USE_FD 89
+#define ZMQ_SNDLZ4 90
+#define ZMQ_RCVLZ4 91
+#define ZMQ_LZ4_THRESHHOLD 92
+#define ZMQ_LZ4_STAT 93
+#define ZMQ_LZ4_STAT_RESET 94
+
+/*  lz4 compression options                                                   */
+#define ZMQ_LZ4_OFF 0x00
+#define ZMQ_LZ4_SND 0x01
+#define ZMQ_LZ4_RCV 0x02
+#define ZMQ_LZ4_BOTH 0x03
+
+struct lz4_stat_t
+{
+    struct info_t
+    {
+        uint64_t n;
+        uint64_t time_us;
+        uint64_t in;
+        uint64_t out;
+    };
+
+    info_t compress;
+    info_t decompress;
+};
 
 /*  Message options                                                           */
 #define ZMQ_MORE 1
