@@ -368,11 +368,11 @@ ZMQ_EXPORT const char *zmq_msg_gets (const zmq_msg_t *msg, const char *property)
 #define ZMQ_VMCI_BUFFER_MAX_SIZE 87
 #define ZMQ_VMCI_CONNECT_TIMEOUT 88
 #define ZMQ_USE_FD 89
-#define ZMQ_SNDLZ4 90
-#define ZMQ_RCVLZ4 91
-#define ZMQ_LZ4_THRESHHOLD 92
-#define ZMQ_LZ4_STAT 93
-#define ZMQ_LZ4_STAT_RESET 94
+#define ZMQ_SNDLZ4 91
+#define ZMQ_RCVLZ4 92
+#define ZMQ_LZ4_THRESHHOLD 93
+#define ZMQ_LZ4_STAT 94
+#define ZMQ_LZ4_STAT_RESET 95
 
 /*  lz4 compression options                                                   */
 #define ZMQ_LZ4_OFF 0x00
@@ -586,9 +586,15 @@ ZMQ_EXPORT void zmq_threadclose (void* thread);
 #define ZMQ_SCATTER 17
 #define ZMQ_DGRAM 18
 
+/*  DRAFT Socket options.                                                     */
+#define ZMQ_BINDTODEVICE 90
+
 /*  DRAFT 0MQ socket events and monitoring                                    */
-#define ZMQ_EVENT_HANDSHAKE_FAILED  0x0800
-#define ZMQ_EVENT_HANDSHAKE_SUCCEED 0x1000
+#define ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL   0x0800
+#define ZMQ_EVENT_HANDSHAKE_SUCCEEDED          0x1000
+#define ZMQ_EVENT_HANDSHAKE_FAILED_ENCRYPTION  0x2000
+#define ZMQ_EVENT_HANDSHAKE_FAILED_ZMTP        0x4000
+#define ZMQ_EVENT_HANDSHAKE_FAILED_ZAP         0x8000
 
 /*  DRAFT Context options                                                     */
 #define ZMQ_MSG_T_SIZE 6
@@ -602,6 +608,12 @@ ZMQ_EXPORT int zmq_msg_set_routing_id(zmq_msg_t *msg, uint32_t routing_id);
 ZMQ_EXPORT uint32_t zmq_msg_routing_id(zmq_msg_t *msg);
 ZMQ_EXPORT int zmq_msg_set_group(zmq_msg_t *msg, const char *group);
 ZMQ_EXPORT const char *zmq_msg_group(zmq_msg_t *msg);
+
+/*  DRAFT Msg property names.                                                 */
+#define ZMQ_MSG_PROPERTY_IDENTITY      "Identity"
+#define ZMQ_MSG_PROPERTY_SOCKET_TYPE   "Socket-Type"
+#define ZMQ_MSG_PROPERTY_USER_ID       "User-Id"
+#define ZMQ_MSG_PROPERTY_PEER_ADDRESS  "Peer-Address"
 
 /******************************************************************************/
 /*  Poller polling on sockets,fd and thread-safe sockets                      */

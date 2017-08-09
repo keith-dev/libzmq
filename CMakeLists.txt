@@ -183,7 +183,7 @@ include (CheckCXXSymbolExists)
 
 check_include_files (ifaddrs.h ZMQ_HAVE_IFADDRS)
 check_include_files (windows.h ZMQ_HAVE_WINDOWS)
-if( ${CMAKE_SYSTEM_NAME} STREQUAL "WindowsStore" AND ${CMAKE_SYSTEM_VERSION} STREQUAL "10.0")
+if(CMAKE_SYSTEM_NAME STREQUAL "WindowsStore" AND CMAKE_SYSTEM_VERSION STREQUAL "10.0")
   SET(ZMQ_HAVE_WINDOWS_UWP ON)
   ADD_DEFINITIONS(-D_WIN32_WINNT=_WIN32_WINNT_WIN10)
 endif()
@@ -323,6 +323,8 @@ endif ()
 #-----------------------------------------------------------------------------
 if (NOT CMAKE_CROSSCOMPILING)
   zmq_check_sock_cloexec ()
+  zmq_check_o_cloexec ()
+  zmq_check_so_bindtodevice ()
   zmq_check_so_keepalive ()
   zmq_check_tcp_keepcnt ()
   zmq_check_tcp_keepidle ()
@@ -330,6 +332,7 @@ if (NOT CMAKE_CROSSCOMPILING)
   zmq_check_tcp_keepalive ()
   zmq_check_tcp_tipc ()
   zmq_check_pthread_setname ()
+  zmq_check_getrandom ()
 endif ()
 
 if (    CMAKE_SYSTEM_NAME MATCHES "Linux"
@@ -703,15 +706,19 @@ endif ()
 if (MSVC)
     # default for all sources is to use precompiled headers
     foreach(source ${sources})
-        set_source_files_properties(${source}
-            PROPERTIES
-            COMPILE_FLAGS "/Yuprecompiled.hpp"
-            )
+        if (NOT ${source} STREQUAL "${CMAKE_CURRENT_SOURCE_DIR}/src/precompiled.cpp")
+            set_source_files_properties(${source}
+                PROPERTIES
+                COMPILE_FLAGS "/Yuprecompiled.hpp"
+                OBJECT_DEPENDS precompiled.hpp
+                )
+        endif()
     endforeach()
     # create precompiled header
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/precompiled.cpp
         PROPERTIES
         COMPILE_FLAGS "/Ycprecompiled.hpp"
+        OBJECT_OUTPUTS precompiled.hpp
         )
     # C and C++ can not use the same precompiled header
     set_source_files_properties(${CMAKE_CURRENT_SOURCE_DIR}/src/tweetnacl.c
@@ -737,6 +744,9 @@ if (BUILD_STATIC)
 endif()
 
 if (MSVC)
+  # Suppress linker warnings caused by #ifdef omission
+  # of file content.
+  set( CMAKE_STATIC_LINKER_FLAGS /ignore:4221 )
   if (BUILD_SHARED)
     add_library (libzmq SHARED ${sources} ${public_headers} ${html-docs} ${readme-docs} ${CMAKE_CURRENT_BINARY_DIR}/NSIS.template.in)
     target_link_libraries (libzmq ${OPTIONAL_LIBRARIES})

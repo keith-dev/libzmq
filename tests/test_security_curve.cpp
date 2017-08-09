@@ -29,22 +29,24 @@
 
 #include "testutil.hpp"
 #if defined (ZMQ_HAVE_WINDOWS)
-#   include <winsock2.h>
-#   include <ws2tcpip.h>
-#   include <stdexcept>
-#   define close closesocket
+#  include <winsock2.h>
+#  include <ws2tcpip.h>
+#  include <stdexcept>
+#  define close closesocket
 #else
-#   include <sys/socket.h>
-#   include <netinet/in.h>
-#   include <arpa/inet.h>
-#   include <unistd.h>
+#  include <sys/socket.h>
+#  include <netinet/in.h>
+#  include <arpa/inet.h>
+#  include <unistd.h>
 #endif
 
 //  We'll generate random test keys at startup
-static char client_public [41];
-static char client_secret [41];
-static char server_public [41];
-static char server_secret [41];
+static char valid_client_public [41];
+static char valid_client_secret [41];
+static char valid_server_public [41];
+static char valid_server_secret [41];
+
+void *zap_requests_handled;
 
 #ifdef ZMQ_BUILD_DRAFT_API
 //  Read one event off the monitor socket; return value and address
@@ -52,13 +54,15 @@ static char server_secret [41];
 //  in case of error.
 
 static int
-get_monitor_event (void *monitor, int *value, char **address)
+get_monitor_event_internal (void *monitor, int *value, char **address, int recv_flag)
 {
     //  First frame in message contains event number and value
     zmq_msg_t msg;
     zmq_msg_init (&msg);
-    if (zmq_msg_recv (&msg, monitor, 0) == -1)
-        return -1;              //  Interruped, presumably
+    if (zmq_msg_recv (&msg, monitor, recv_flag) == -1) {
+        assert (errno == EAGAIN);
+        return -1; //  timed out or no message available
+    }
     assert (zmq_msg_more (&msg));
 
     uint8_t *data = (uint8_t *) zmq_msg_data (&msg);
@@ -68,8 +72,8 @@ get_monitor_event (void *monitor, int *value, char **address)
 
     //  Second frame in message contains event address
     zmq_msg_init (&msg);
-    if (zmq_msg_recv (&msg, monitor, 0) == -1)
-        return -1;              //  Interruped, presumably
+    int res = zmq_msg_recv (&msg, monitor, recv_flag) == -1;
+    assert (res != -1);
     assert (!zmq_msg_more (&msg));
 
     if (address) {
@@ -81,20 +85,107 @@ get_monitor_event (void *monitor, int *value, char **address)
     }
     return event;
 }
+
+int get_monitor_event_with_timeout (void *monitor,
+                                    int *value,
+                                    char **address,
+                                    int timeout)
+{
+    int res;
+    if (timeout == -1) {
+        // process infinite timeout in small steps to allow the user
+        // to see some information on the console
+
+        int timeout_step = 250;
+        int wait_time = 0;
+        zmq_setsockopt (monitor, ZMQ_RCVTIMEO, &timeout_step,
+                        sizeof (timeout_step));
+        while ((res = get_monitor_event_internal (monitor, value, address, 0))
+               == -1) {
+            wait_time += timeout_step;
+            fprintf (stderr, "Still waiting for monitor event after %i ms\n",
+                     wait_time);
+        }
+    } else {
+        zmq_setsockopt (monitor, ZMQ_RCVTIMEO, &timeout, sizeof (timeout));
+        res = get_monitor_event_internal (monitor, value, address, 0);
+    }
+    int timeout_infinite = -1;
+    zmq_setsockopt (monitor, ZMQ_RCVTIMEO, &timeout_infinite,
+                    sizeof (timeout_infinite));
+    return res;
+}
+
+// assert_* are macros rather than functions, to allow assertion failures be
+// attributed to the causing source code line
+#define assert_no_more_monitor_events_with_timeout(monitor, timeout)           \
+    {                                                                          \
+        int event_count = 0;                                                   \
+        int event, err;                                                        \
+        while ((event = get_monitor_event_with_timeout ((monitor), &err, NULL, \
+                                                        (timeout)))            \
+               != -1) {                                                        \
+            ++event_count;                                                     \
+            fprintf (stderr, "Unexpected event: %x (err = %i)\n", event, err); \
+        }                                                                      \
+        assert (event_count == 0);                                             \
+    }
+
 #endif
 
-
 //  --------------------------------------------------------------------------
-//  This methods receives and validates ZAP requestes (allowing or denying
+//  This methods receives and validates ZAP requests (allowing or denying
 //  each client connection).
 
-static void zap_handler (void *handler)
+enum zap_protocol_t
 {
+  zap_ok,
+  // ZAP-compliant non-standard cases
+  zap_status_temporary_failure,
+  zap_status_internal_error,
+  // ZAP protocol errors
+  zap_wrong_version,
+  zap_wrong_request_id,
+  zap_status_invalid,
+  zap_too_many_parts
+};
+
+static void zap_handler_generic (void *ctx, zap_protocol_t zap_protocol)
+{
+    void *control = zmq_socket (ctx, ZMQ_REQ);
+    assert (control);
+    int rc = zmq_connect (control, "inproc://handler-control");
+    assert (rc == 0);
+
+    void *handler = zmq_socket (ctx, ZMQ_REP);
+    assert (handler);
+    rc = zmq_bind (handler, "inproc://zeromq.zap.01");
+    assert (rc == 0);
+
+    //  Signal main thread that we are ready
+    rc = s_send (control, "GO");
+    assert (rc == 2);
+
+    zmq_pollitem_t items [] = {
+        { control, 0, ZMQ_POLLIN, 0 },
+        { handler, 0, ZMQ_POLLIN, 0 },
+    };
+
     //  Process ZAP requests forever
-    while (true) {
+    while (zmq_poll (items, 2, -1) >= 0) {
+        if (items [0].revents & ZMQ_POLLIN) {
+            char *buf = s_recv (control);
+            assert (buf);
+            assert (streq (buf, "STOP"));
+            free (buf);
+            break; //  Terminating - main thread signal
+        }
+        if (!(items [1].revents & ZMQ_POLLIN))
+            continue;
+
         char *version = s_recv (handler);
         if (!version)
-            break;          //  Terminating
+            break; //  Terminating - peer's socket closed
 
         char *sequence = s_recv (handler);
         char *domain = s_recv (handler);
@@ -112,20 +203,40 @@ static void zap_handler (void *handler)
         assert (streq (mechanism, "CURVE"));
         assert (streq (identity, "IDENT"));
 
-        s_sendmore (handler, version);
-        s_sendmore (handler, sequence);
+        s_sendmore (handler, zap_protocol == zap_wrong_version
+                               ? "invalid_version"
+                               : version);
+        s_sendmore (handler, zap_protocol == zap_wrong_request_id
+                               ? "invalid_request_id"
+                               : sequence);
 
-        if (streq (client_key_text, client_public)) {
-            s_sendmore (handler, "200");
+        if (streq (client_key_text, valid_client_public)) {
+            const char *status_code;
+            switch (zap_protocol) {
+                case zap_status_internal_error:
+                    status_code = "500";
+                    break;
+                case zap_status_temporary_failure:
+                    status_code = "300";
+                    break;
+                case zap_status_invalid:
+                    status_code = "invalid_status";
+                    break;
+                default:
+                    status_code = "200";
+            }
+            s_sendmore (handler, status_code);
             s_sendmore (handler, "OK");
             s_sendmore (handler, "anonymous");
-            s_send     (handler, "");
-        }
-        else {
+            if (zap_protocol == zap_too_many_parts) {
+                s_sendmore (handler, "");
+            }
+            s_send (handler, "");
+        } else {
             s_sendmore (handler, "400");
             s_sendmore (handler, "Invalid client public key");
             s_sendmore (handler, "");
-            s_send     (handler, "");
+            s_send (handler, "");
         }
         free (version);
         free (sequence);
@@ -133,223 +244,374 @@ static void zap_handler (void *handler)
         free (address);
         free (identity);
         free (mechanism);
+
+        zmq_atomic_counter_inc (zap_requests_handled);
     }
-    zmq_close (handler);
+    rc = zmq_unbind (handler, "inproc://zeromq.zap.01");
+    assert (rc == 0);
+    close_zero_linger (handler);
+
+    rc = s_send (control, "STOPPED");
+    assert (rc == 7);
+    close_zero_linger (control);
 }
 
-
-int main (void)
+static void zap_handler (void *ctx)
 {
-#ifndef ZMQ_HAVE_CURVE
-    printf ("CURVE encryption not installed, skipping test\n");
-    return 0;
-#endif
-    //  Generate new keypairs for this test
-    int rc = zmq_curve_keypair (client_public, client_secret);
+    zap_handler_generic (ctx, zap_ok);
+}
+
+static void zap_handler_wrong_version (void *ctx)
+{
+    zap_handler_generic (ctx, zap_wrong_version);
+}
+
+static void zap_handler_wrong_request_id (void *ctx)
+{
+    zap_handler_generic (ctx, zap_wrong_request_id);
+}
+
+static void zap_handler_wrong_status_invalid (void *ctx)
+{
+    zap_handler_generic (ctx, zap_status_invalid);
+}
+
+static void zap_handler_wrong_status_temporary_failure (void *ctx)
+{
+    zap_handler_generic (ctx, zap_status_temporary_failure);
+}
+
+static void zap_handler_wrong_status_internal_error (void *ctx)
+{
+    zap_handler_generic (ctx, zap_status_internal_error);
+}
+
+static void zap_handler_too_many_parts (void *ctx)
+{
+    zap_handler_generic (ctx, zap_too_many_parts);
+}
+
+void *create_and_connect_curve_client (void *ctx,
+                                       char *server_public,
+                                       char *client_public,
+                                       char *client_secret,
+                                       char *my_endpoint)
+{
+    void *client = zmq_socket (ctx, ZMQ_DEALER);
+    assert (client);
+    int rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, server_public, 41);
     assert (rc == 0);
-    rc = zmq_curve_keypair (server_public, server_secret);
+    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, client_public, 41);
+    assert (rc == 0);
+    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, client_secret, 41);
+    assert (rc == 0);
+    rc = zmq_connect (client, my_endpoint);
     assert (rc == 0);
 
-    setup_test_environment ();
-    void *ctx = zmq_ctx_new ();
-    assert (ctx);
+    return client;
+}
+
+void expect_new_client_curve_bounce_fail (void *ctx,
+                                          char *server_public,
+                                          char *client_public,
+                                          char *client_secret,
+                                          char *my_endpoint,
+                                          void *server)
+{
+    void *client = create_and_connect_curve_client (
+      ctx, server_public, client_public, client_secret, my_endpoint);
+    expect_bounce_fail (server, client);
+    close_zero_linger (client);
+}
+
+#ifdef ZMQ_BUILD_DRAFT_API
+//  expects that one or more occurrences of the expected event are received 
+//  via the specified socket monitor
+//  returns the number of occurrences of the expected event
+//  interrupts, if a ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL with EPIPE, ECONNRESET
+//  or ECONNABORTED occurs; in this case, 0 is returned
+//  this should be investigated further, see 
+//  https://github.com/zeromq/libzmq/issues/2644
+int expect_monitor_event_multiple (void *server_mon,
+                                   int expected_event,
+                                   int expected_err = -1)
+{
+    int count_of_expected_events = 0;
+    int client_closed_connection = 0;
+    //  infinite timeout at the start
+    int timeout = -1;
+
+    int event;
+    int err;
+    while (
+      (event = get_monitor_event_with_timeout (server_mon, &err, NULL, timeout))
+      != -1) {
+        timeout = 250;
+
+        // ignore errors with EPIPE/ECONNRESET/ECONNABORTED, which can happen
+        // ECONNRESET can happen on very slow machines, when the engine writes
+        // to the peer and then tries to read the socket before the peer reads
+        // ECONNABORTED happens when a client aborts a connection via RST/timeout
+        if (event == ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL &&
+                (err == EPIPE || err == ECONNRESET || err == ECONNABORTED)) {
+            fprintf (
+              stderr,
+              "Ignored event (skipping any further events): %x (err = %i)\n",
+              event, err);
+            client_closed_connection = 1;
+            break;
+        }
+        if (event != expected_event
+            || (-1 != expected_err && err != expected_err)) {
+            fprintf (stderr, "Unexpected event: %x (err = %i)\n", event, err);
+            assert (false);
+        }
+        ++count_of_expected_events;
+    }
+    assert (count_of_expected_events > 0 || client_closed_connection);
+
+    return count_of_expected_events;
+}
+#endif
+
+void test_garbage_key(void *ctx,
+                       void *server,
+                       void *server_mon,
+                       char *my_endpoint,
+                       char *server_public,
+                       char *client_public,
+                       char *client_secret)
+{
+    expect_new_client_curve_bounce_fail (ctx, server_public, client_public,
+                                         client_secret, my_endpoint, server);
+
+#ifdef ZMQ_BUILD_DRAFT_API
+    int handshake_failed_encryption_event_count =
+      expect_monitor_event_multiple (server_mon,
+                                     ZMQ_EVENT_HANDSHAKE_FAILED_ENCRYPTION);
+
+    // handshake_failed_encryption_event_count should be at least two because 
+    // expect_bounce_fail involves two exchanges
+    // however, with valgrind we see only one event (maybe the next one takes 
+    // very long, or does not happen at all because something else takes very 
+    // long)
+
+    fprintf (stderr,
+             "count of ZMQ_EVENT_HANDSHAKE_FAILED_ENCRYPTION events: %i\n",
+             handshake_failed_encryption_event_count);
+#endif
+}
+
+void setup_context_and_server_side (void **ctx,
+                                    void **handler,
+                                    void **zap_thread,
+                                    void **server,
+                                    void **server_mon,
+                                    char *my_endpoint,
+                                    zmq_thread_fn zap_handler_ = &zap_handler)
+{
+    *ctx = zmq_ctx_new ();
+    assert (*ctx);
 
     //  Spawn ZAP handler
-    //  We create and bind ZAP socket in main thread to avoid case
-    //  where child thread does not start up fast enough.
-    void *handler = zmq_socket (ctx, ZMQ_REP);
-    assert (handler);
-    rc = zmq_bind (handler, "inproc://zeromq.zap.01");
+    zap_requests_handled = zmq_atomic_counter_new ();
+    assert (zap_requests_handled != NULL);
+
+    *handler = zmq_socket (*ctx, ZMQ_REP);
+    assert (*handler);
+    int rc = zmq_bind (*handler, "inproc://handler-control");
     assert (rc == 0);
-    void *zap_thread = zmq_threadstart (&zap_handler, handler);
+
+    *zap_thread = zmq_threadstart (zap_handler_, *ctx);
+
+    char *buf = s_recv (*handler);
+    assert (buf);
+    assert (streq (buf, "GO"));
+    free (buf);
 
     //  Server socket will accept connections
-    void *server = zmq_socket (ctx, ZMQ_DEALER);
-    assert (server);
+    *server = zmq_socket (*ctx, ZMQ_DEALER);
+    assert (*server);
+
     int as_server = 1;
-    rc = zmq_setsockopt (server, ZMQ_CURVE_SERVER, &as_server, sizeof (int));
+    rc = zmq_setsockopt (*server, ZMQ_CURVE_SERVER, &as_server, sizeof (int));
     assert (rc == 0);
-    rc = zmq_setsockopt (server, ZMQ_CURVE_SECRETKEY, server_secret, 41);
+
+    rc = zmq_setsockopt (*server, ZMQ_CURVE_SECRETKEY, valid_server_secret, 41);
     assert (rc == 0);
-    rc = zmq_setsockopt (server, ZMQ_IDENTITY, "IDENT", 6);
+
+    rc = zmq_setsockopt (*server, ZMQ_IDENTITY, "IDENT", 6);
     assert (rc == 0);
-    rc = zmq_bind (server, "tcp://127.0.0.1:*");
+
+    rc = zmq_bind (*server, "tcp://127.0.0.1:*");
     assert (rc == 0);
 
     size_t len = MAX_SOCKET_STRING;
-    char my_endpoint[MAX_SOCKET_STRING];
-    rc = zmq_getsockopt (server, ZMQ_LAST_ENDPOINT, my_endpoint, &len);
+    rc = zmq_getsockopt (*server, ZMQ_LAST_ENDPOINT, my_endpoint, &len);
     assert (rc == 0);
 
 #ifdef ZMQ_BUILD_DRAFT_API
+    char monitor_endpoint [] = "inproc://monitor-server";
+
     //  Monitor handshake events on the server
-    rc = zmq_socket_monitor (server, "inproc://monitor-server",
-            ZMQ_EVENT_HANDSHAKE_SUCCEED | ZMQ_EVENT_HANDSHAKE_FAILED);
+    rc = zmq_socket_monitor (
+      *server, monitor_endpoint,
+      ZMQ_EVENT_HANDSHAKE_SUCCEEDED | ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL
+        | ZMQ_EVENT_HANDSHAKE_FAILED_ZAP | ZMQ_EVENT_HANDSHAKE_FAILED_ZMTP
+        | ZMQ_EVENT_HANDSHAKE_FAILED_ENCRYPTION);
     assert (rc == 0);
 
     //  Create socket for collecting monitor events
-    void *server_mon = zmq_socket (ctx, ZMQ_PAIR);
-    assert (server_mon);
+    *server_mon = zmq_socket (*ctx, ZMQ_PAIR);
+    assert (*server_mon);
 
     //  Connect it to the inproc endpoints so they'll get events
-    rc = zmq_connect (server_mon, "inproc://monitor-server");
+    rc = zmq_connect (*server_mon, monitor_endpoint);
     assert (rc == 0);
 #endif
+}
 
-    //  Check CURVE security with valid credentials
-    void *client = zmq_socket (ctx, ZMQ_DEALER);
-    assert (client);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, server_public, 41);
+void shutdown_context_and_server_side (void *ctx,
+                                       void *zap_thread,
+                                       void *server,
+                                       void *server_mon,
+                                       void *handler)
+{
+    int rc = s_send (handler, "STOP");
+    assert (rc == 4);
+    char *buf = s_recv (handler);
+    assert (buf);
+    assert (streq (buf, "STOPPED"));
+    free (buf);
+    rc = zmq_unbind (handler, "inproc://handler-control");
     assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, client_public, 41);
+    close_zero_linger (handler);
+
+#ifdef ZMQ_BUILD_DRAFT_API
+    close_zero_linger (server_mon);
+#endif
+    close_zero_linger (server);
+
+    //  Wait until ZAP handler terminates
+    zmq_threadclose (zap_thread);
+
+    rc = zmq_ctx_term (ctx);
     assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, client_secret, 41);
-    assert (rc == 0);
-    rc = zmq_connect (client, my_endpoint);
-    assert (rc == 0);
+
+    zmq_atomic_counter_destroy (&zap_requests_handled);
+}
+
+void test_curve_security_with_valid_credentials (
+  void *ctx, char *my_endpoint, void *server, void *server_mon, int timeout)
+{
+    void *client = create_and_connect_curve_client (
+      ctx, valid_server_public, valid_client_public, valid_client_secret, my_endpoint);
     bounce (server, client);
-    rc = zmq_close (client);
+    int rc = zmq_close (client);
     assert (rc == 0);
 
 #ifdef ZMQ_BUILD_DRAFT_API
-    int event = get_monitor_event (server_mon, NULL, NULL);
-    assert (event == ZMQ_EVENT_HANDSHAKE_SUCCEED);
+    int event = get_monitor_event_with_timeout (server_mon, NULL, NULL, -1);
+    assert (event == ZMQ_EVENT_HANDSHAKE_SUCCEEDED);
+
+    assert_no_more_monitor_events_with_timeout (server_mon, timeout);
 #endif
+}
 
-    //  Check CURVE security with a garbage server key
-    //  This will be caught by the curve_server class, not passed to ZAP
-    char garbage_key [] = "0000000000000000000000000000000000000000";
-    client = zmq_socket (ctx, ZMQ_DEALER);
-    assert (client);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, garbage_key, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, client_public, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, client_secret, 41);
-    assert (rc == 0);
-    rc = zmq_connect (client, my_endpoint);
-    assert (rc == 0);
-    expect_bounce_fail (server, client);
-    close_zero_linger (client);
-
-#ifdef ZMQ_BUILD_DRAFT_API
-    event = get_monitor_event (server_mon, NULL, NULL);
-    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
-#endif
-
-    //  Check CURVE security with a garbage client public key
-    //  This will be caught by the curve_server class, not passed to ZAP
-    client = zmq_socket (ctx, ZMQ_DEALER);
-    assert (client);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, server_public, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, garbage_key, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, client_secret, 41);
-    assert (rc == 0);
-    rc = zmq_connect (client, my_endpoint);
-    assert (rc == 0);
-    expect_bounce_fail (server, client);
-    close_zero_linger (client);
-
-#ifdef ZMQ_BUILD_DRAFT_API
-    event = get_monitor_event (server_mon, NULL, NULL);
-    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
-#endif
-
-    //  Check CURVE security with a garbage client secret key
-    //  This will be caught by the curve_server class, not passed to ZAP
-    client = zmq_socket (ctx, ZMQ_DEALER);
-    assert (client);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, server_public, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, client_public, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, garbage_key, 41);
-    assert (rc == 0);
-    rc = zmq_connect (client, my_endpoint);
-    assert (rc == 0);
-    expect_bounce_fail (server, client);
-    close_zero_linger (client);
-
-#ifdef ZMQ_BUILD_DRAFT_API
-    event = get_monitor_event (server_mon, NULL, NULL);
-    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
-#endif
-
-    //  Check CURVE security with bogus client credentials
+void test_curve_security_with_bogus_client_credentials (
+  void *ctx, char *my_endpoint, void *server, void *server_mon, int timeout)
+{
     //  This must be caught by the ZAP handler
     char bogus_public [41];
     char bogus_secret [41];
     zmq_curve_keypair (bogus_public, bogus_secret);
 
-    client = zmq_socket (ctx, ZMQ_DEALER);
-    assert (client);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, server_public, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, bogus_public, 41);
-    assert (rc == 0);
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, bogus_secret, 41);
-    assert (rc == 0);
-    rc = zmq_connect (client, my_endpoint);
+    expect_new_client_curve_bounce_fail (ctx, valid_server_public, bogus_public,
+                                         bogus_secret, my_endpoint, server);
+
+    int event_count = 0;
+#ifdef ZMQ_BUILD_DRAFT_API
+    // TODO add another event type ZMQ_EVENT_HANDSHAKE_FAILED_AUTH for this case?
+    event_count = expect_monitor_event_multiple (
+      server_mon, ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL, EACCES);
+    assert (event_count <= 1);
+#endif
+
+    // there may be more than one ZAP request due to repeated attempts by the client
+    assert (0 == event_count
+            || 1 <= zmq_atomic_counter_value (zap_requests_handled));
+}
+
+void expect_zmtp_failure (void *client, char *my_endpoint, void *server, void *server_mon)
+{
+    //  This must be caught by the curve_server class, not passed to ZAP
+    int rc = zmq_connect (client, my_endpoint);
     assert (rc == 0);
     expect_bounce_fail (server, client);
     close_zero_linger (client);
 
-#ifdef ZMQ_BUILD_DRAFT_API
-    event = get_monitor_event (server_mon, NULL, NULL);
-    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
-#endif
-
-    //  Check CURVE security with NULL client credentials
-    //  This must be caught by the curve_server class, not passed to ZAP
-    client = zmq_socket (ctx, ZMQ_DEALER);
-    assert (client);
-    rc = zmq_connect (client, my_endpoint);
-    assert (rc == 0);
-    expect_bounce_fail (server, client);
-    close_zero_linger (client);
 
 #ifdef ZMQ_BUILD_DRAFT_API
-    event = get_monitor_event (server_mon, NULL, NULL);
-    assert (event == ZMQ_EVENT_HANDSHAKE_FAILED);
+    expect_monitor_event_multiple (server_mon, ZMQ_EVENT_HANDSHAKE_FAILED_ZMTP);
 #endif
 
-    //  Check CURVE security with PLAIN client credentials
-    //  This must be caught by the curve_server class, not passed to ZAP
-    client = zmq_socket (ctx, ZMQ_DEALER);
+    assert (0 == zmq_atomic_counter_value (zap_requests_handled));
+}
+
+void test_curve_security_with_null_client_credentials (void *ctx,
+                                                       char *my_endpoint,
+                                                       void *server,
+                                                       void *server_mon)
+{
+    void *client = zmq_socket (ctx, ZMQ_DEALER);
     assert (client);
-    rc = zmq_setsockopt (client, ZMQ_PLAIN_USERNAME, "admin", 5);
+
+    expect_zmtp_failure (client, my_endpoint, server, server_mon);
+}
+
+void test_curve_security_with_plain_client_credentials (void *ctx,
+                                                        char *my_endpoint,
+                                                        void *server,
+                                                        void *server_mon)
+{
+    void *client = zmq_socket (ctx, ZMQ_DEALER);
+    assert (client);
+    int rc = zmq_setsockopt (client, ZMQ_PLAIN_USERNAME, "admin", 5);
     assert (rc == 0);
     rc = zmq_setsockopt (client, ZMQ_PLAIN_PASSWORD, "password", 8);
     assert (rc == 0);
-    expect_bounce_fail (server, client);
-    close_zero_linger (client);
 
+    expect_zmtp_failure (client, my_endpoint, server, server_mon);
+}
+
+void test_curve_security_unauthenticated_message (char *my_endpoint,
+                                                  void *server,
+                                                  int timeout)
+{
     // Unauthenticated messages from a vanilla socket shouldn't be received
     struct sockaddr_in ip4addr;
     int s;
 
     unsigned short int port;
-    rc = sscanf(my_endpoint, "tcp://127.0.0.1:%hu", &port);
+    int rc = sscanf (my_endpoint, "tcp://127.0.0.1:%hu", &port);
     assert (rc == 1);
 
     ip4addr.sin_family = AF_INET;
     ip4addr.sin_port = htons (port);
-#if defined (ZMQ_HAVE_WINDOWS) && (_WIN32_WINNT < 0x0600)
+#if defined(ZMQ_HAVE_WINDOWS) && (_WIN32_WINNT < 0x0600)
     ip4addr.sin_addr.s_addr = inet_addr ("127.0.0.1");
 #else
-    inet_pton(AF_INET, "127.0.0.1", &ip4addr.sin_addr);
+    inet_pton (AF_INET, "127.0.0.1", &ip4addr.sin_addr);
 #endif
 
     s = socket (AF_INET, SOCK_STREAM, IPPROTO_TCP);
-    rc = connect (s, (struct sockaddr*) &ip4addr, sizeof (ip4addr));
+    rc = connect (s, (struct sockaddr *) &ip4addr, sizeof (ip4addr));
     assert (rc > -1);
     // send anonymous ZMTP/1.0 greeting
     send (s, "\x01\x00", 2, 0);
     // send sneaky message that shouldn't be received
     send (s, "\x08\x00sneaky\0", 9, 0);
-    int timeout = 250;
+
     zmq_setsockopt (server, ZMQ_RCVTIMEO, &timeout, sizeof (timeout));
     char *buf = s_recv (server);
     if (buf != NULL) {
@@ -357,33 +619,240 @@ int main (void)
         assert (buf == NULL);
     }
     close (s);
+}
 
+void test_curve_security_zap_unsuccessful (void *ctx,
+                                           char *my_endpoint,
+                                           void *server,
+                                           void *server_mon,
+                                           int expected_event,
+                                           int expected_err)
+{
+    expect_new_client_curve_bounce_fail (
+      ctx, valid_server_public, valid_client_public, valid_client_secret,
+      my_endpoint, server);
+
+    int events_received = 0;
+#ifdef ZMQ_BUILD_DRAFT_API
+    events_received =
+      expect_monitor_event_multiple (server_mon, expected_event, expected_err);
+#endif
+
+    // there may be more than one ZAP request due to repeated attempts by the client
+    assert (events_received == 0
+            || 1 <= zmq_atomic_counter_value (zap_requests_handled));
+}
+
+void test_curve_security_zap_protocol_error (void *ctx,
+                                             char *my_endpoint,
+                                             void *server,
+                                             void *server_mon)
+{
+    test_curve_security_zap_unsuccessful (ctx, my_endpoint, server, server_mon,
+#ifdef ZMQ_BUILD_DRAFT_API
+                                          ZMQ_EVENT_HANDSHAKE_FAILED_ZAP, EPROTO
+#else
+                                          0, 0
+#endif
+    );
+}
+
+void test_curve_security_invalid_keysize (void *ctx)
+{
     //  Check return codes for invalid buffer sizes
-    client = zmq_socket (ctx, ZMQ_DEALER);
+    void *client = zmq_socket (ctx, ZMQ_DEALER);
     assert (client);
     errno = 0;
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, server_public, 123);
+    int rc = zmq_setsockopt (client, ZMQ_CURVE_SERVERKEY, valid_server_public, 123);
     assert (rc == -1 && errno == EINVAL);
     errno = 0;
-    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, client_public, 123);
+    rc = zmq_setsockopt (client, ZMQ_CURVE_PUBLICKEY, valid_client_public, 123);
     assert (rc == -1 && errno == EINVAL);
     errno = 0;
-    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, client_secret, 123);
+    rc = zmq_setsockopt (client, ZMQ_CURVE_SECRETKEY, valid_client_secret, 123);
     assert (rc == -1 && errno == EINVAL);
     rc = zmq_close (client);
     assert (rc == 0);
+}
 
-    //  Shutdown
-#ifdef ZMQ_BUILD_DRAFT_API
-    close_zero_linger (server_mon);
-#endif
-    rc = zmq_close (server);
+int main (void)
+{
+    if (!zmq_has ("curve")) {
+        printf ("CURVE encryption not installed, skipping test\n");
+        return 0;
+    }
+
+    //  Generate new keypairs for these tests
+    int rc = zmq_curve_keypair (valid_client_public, valid_client_secret);
     assert (rc == 0);
+    rc = zmq_curve_keypair (valid_server_public, valid_server_secret);
+    assert (rc == 0);
+
+    int timeout = 250;
+
+    setup_test_environment ();
+
+    void *ctx;
+    void *handler;
+    void *zap_thread;
+    void *server;
+    void *server_mon;
+    char my_endpoint [MAX_SOCKET_STRING];
+
+    fprintf (stderr, "test_curve_security_with_valid_credentials\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_curve_security_with_valid_credentials (ctx, my_endpoint, server,
+                                                server_mon, timeout);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    char garbage_key [] = "0000000000000000000000000000000000000000";
+
+    //  Check CURVE security with a garbage server key
+    //  This will be caught by the curve_server class, not passed to ZAP
+    fprintf (stderr, "test_garbage_server_key\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_garbage_key (ctx, server, server_mon, my_endpoint, garbage_key,
+                      valid_client_public, valid_client_secret);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  Check CURVE security with a garbage client public key
+    //  This will be caught by the curve_server class, not passed to ZAP
+    fprintf (stderr, "test_garbage_client_public_key\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_garbage_key (ctx, server, server_mon, my_endpoint, valid_server_public,
+                      garbage_key, valid_client_secret);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  Check CURVE security with a garbage client secret key
+    //  This will be caught by the curve_server class, not passed to ZAP
+    fprintf (stderr, "test_garbage_client_secret_key\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_garbage_key (ctx, server, server_mon, my_endpoint, valid_server_public,
+                      valid_client_public, garbage_key);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    fprintf (stderr, "test_curve_security_with_bogus_client_credentials\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_curve_security_with_bogus_client_credentials (ctx, my_endpoint, server,
+                                                       server_mon, timeout);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    fprintf (stderr, "test_curve_security_with_null_client_credentials\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_curve_security_with_null_client_credentials (ctx, my_endpoint, server,
+                                                      server_mon);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    fprintf (stderr, "test_curve_security_with_plain_client_credentials\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_curve_security_with_plain_client_credentials (ctx, my_endpoint, server,
+                                                       server_mon);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    fprintf (stderr, "test_curve_security_unauthenticated_message\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint);
+    test_curve_security_unauthenticated_message (my_endpoint, server, timeout);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  Invalid ZAP protocol tests
+
+    //  wrong version
+    fprintf (stderr, "test_curve_security_zap_protocol_error wrong_version\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint,
+                                   &zap_handler_wrong_version);
+    test_curve_security_zap_protocol_error (ctx, my_endpoint, server,
+                                            server_mon);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  wrong request id
+    fprintf (stderr, "test_curve_security_zap_protocol_error wrong_request_id\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint,
+                                   &zap_handler_wrong_request_id);
+    test_curve_security_zap_protocol_error (ctx, my_endpoint, server,
+                                            server_mon);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  status invalid (not a 3-digit number)
+    fprintf (stderr, "test_curve_security_zap_protocol_error wrong_status_invalid\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint,
+                                   &zap_handler_wrong_status_invalid);
+    test_curve_security_zap_protocol_error (ctx, my_endpoint, server,
+                                            server_mon);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  too many parts
+    fprintf (stderr, "test_curve_security_zap_protocol_error too_many_parts\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint,
+                                   &zap_handler_too_many_parts);
+    test_curve_security_zap_protocol_error (ctx, my_endpoint, server,
+                                            server_mon);
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  ZAP non-standard cases
+
+    //  TODO make these observable on the client side as well (they are 
+    //  transmitted as an ERROR message)
+
+    //  status 300 temporary failure
+    fprintf (stderr, "test_curve_security_zap_unsuccessful status 300\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint,
+                                   &zap_handler_wrong_status_temporary_failure);
+    test_curve_security_zap_unsuccessful (ctx, my_endpoint, server, server_mon,
+#ifdef ZMQ_BUILD_DRAFT_API
+                                          ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL,
+                                          EAGAIN
+#else
+                                          0, 0
+#endif
+    );
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    //  status 500 internal error
+    fprintf (stderr, "test_curve_security_zap_unsuccessful status 500\n");
+    setup_context_and_server_side (&ctx, &handler, &zap_thread, &server,
+                                   &server_mon, my_endpoint,
+                                   &zap_handler_wrong_status_internal_error);
+    test_curve_security_zap_unsuccessful (ctx, my_endpoint, server, server_mon,
+#ifdef ZMQ_BUILD_DRAFT_API
+                                          ZMQ_EVENT_HANDSHAKE_FAILED_NO_DETAIL,
+                                          EFAULT
+#else
+                                          0, 0
+#endif
+    );
+    shutdown_context_and_server_side (ctx, zap_thread, server, server_mon,
+            handler);
+
+    ctx = zmq_ctx_new ();
+    test_curve_security_invalid_keysize (ctx);
     rc = zmq_ctx_term (ctx);
     assert (rc == 0);
-
-    //  Wait until ZAP handler terminates
-    zmq_threadclose (zap_thread);
 
     return 0;
 }

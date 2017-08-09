@@ -42,7 +42,7 @@ const int hwm = 30 * 1024;
 const size_t maxsz = 10 * 1024;
 
 int rc;
-size_t len = MAX_SOCKET_STRING;
+size_t len;
 char endpoint1[MAX_SOCKET_STRING];
 char endpoint2[MAX_SOCKET_STRING];
 
@@ -348,9 +348,9 @@ int main (void)
             fclose (f);
         }
 
-		if (end_of_header)
+        if (end_of_header)
         {
-        	// next messages are payload, compression the payload
+            // next messages are payload, compression the payload
             rc = send_lz4 ("dealer", dealer, 1);
             assert (rc == 0);
         }
@@ -397,7 +397,7 @@ int main (void)
         }
         assert (rc >= 0);
 
-		if (end_of_header)
+        if (end_of_header)
         {
             // next messages are payload, decompression the payload
             rc = recv_lz4 ("dealer", dealer, 1);

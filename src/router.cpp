@@ -159,6 +159,7 @@ void zmq::router_t::xpipe_terminated (pipe_t *pipe_)
         zmq_assert (iter != outpipes.end ());
         outpipes.erase (iter);
         fq.pipe_terminated (pipe_);
+        pipe_->rollback ();
         if (pipe_ == current_out)
             current_out = NULL;
     }
@@ -273,6 +274,9 @@ int zmq::router_t::xsend (msg_t *msg_)
             // Message failed to send - we must close it ourselves.
             int rc = msg_->close ();
             errno_assert (rc == 0);
+            // HWM was checked before, so the pipe must be gone. Roll back
+            // messages that were piped, for example REP labels.
+            current_out->rollback ();
             current_out = NULL;
         } else {
           if (!more_out) {
@@ -419,10 +423,19 @@ bool zmq::router_t::xhas_in ()
 
 bool zmq::router_t::xhas_out ()
 {
-    //  In theory, ROUTER socket is always ready for writing. Whether actual
-    //  attempt to write succeeds depends on which pipe the message is going
-    //  to be routed to.
-    return true;
+    //  In theory, ROUTER socket is always ready for writing (except when
+    //  MANDATORY is set). Whether actual attempt to write succeeds depends
+    //  on whitch pipe the message is going to be routed to.
+
+    if(!mandatory)
+        return true;
+
+    bool has_out = false;
+    outpipes_t::iterator it;
+    for (it = outpipes.begin (); it != outpipes.end (); ++it)
+        has_out |= it->second.pipe->check_hwm();
+
+    return has_out;
 }
 
 zmq::blob_t zmq::router_t::get_credential () const

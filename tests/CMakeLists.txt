@@ -134,7 +134,7 @@ if(WIN32)
     add_definitions(-DZMQ_CUSTOM_PLATFORM_HPP)
     add_definitions(-D_WINSOCK_DEPRECATED_NO_WARNINGS)
     # Same name on 64bit systems
-    link_libraries(Ws2_32.lib)
+    link_libraries(ws2_32.lib)
 endif()
 
 # add library and include dirs for all targets
@@ -168,6 +168,9 @@ foreach(test ${tests})
   endif()
   set_tests_properties(${test} PROPERTIES TIMEOUT 10)
 endforeach()
+
+#override timeout for these tests
+set_tests_properties(test_security_curve PROPERTIES TIMEOUT 60)
 
 #Check whether all tests in the current folder are present
 file(READ "${CMAKE_CURRENT_LIST_FILE}" CURRENT_LIST_FILE_CONTENT)
