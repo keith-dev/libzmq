@@ -922,8 +922,10 @@ void randombytes (unsigned char *x,unsigned long long xlen)
 {
     int i;
 #ifndef ZMQ_HAVE_GETRANDOM
-    //  Require that random_open has already been called, to avoid
-    //  race conditions.
+    /*
+        Require that random_open has already been called, to avoid
+        race conditions.
+     */
     assert (fd != -1);
 #endif
     while (xlen > 0) {
@@ -946,7 +948,7 @@ void randombytes (unsigned char *x,unsigned long long xlen)
     }
 }
 
-//  Do not call manually! Use random_close from random.hpp
+/*  Do not call manually! Use random_close from random.hpp */
 int randombytes_close (void)
 {
     int rc = -1;
@@ -955,11 +957,11 @@ int randombytes_close (void)
         fd = -1;
         rc = 0;
     }
-#endif // ZMQ_HAVE_GETRANDOM
+#endif /* ZMQ_HAVE_GETRANDOM */
     return rc;
 }
 
-//  Do not call manually! Use random_open from random.hpp
+/*  Do not call manually! Use random_open from random.hpp */
 int sodium_init (void)
 {
 #ifndef ZMQ_HAVE_GETRANDOM
@@ -979,7 +981,7 @@ int sodium_init (void)
         assert (rc != -1);
 #endif
     }
-#endif // ZMQ_HAVE_GETRANDOM
+#endif /* ZMQ_HAVE_GETRANDOM */
     return 0;
 }
 
