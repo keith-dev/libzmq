@@ -33,7 +33,11 @@
 #include <algorithm>
 #include <stdlib.h>
 
-#define LOGFILE "test_lz4_reqrep_device.log"
+#ifndef MAX_SOCKET_STRING
+#define MAX_SOCKET_STRING 32
+#endif
+
+#define LOGFILE "tests/test_lz4_reqrep_device.log"
 
 typedef std::vector<char> buffer_t;
 typedef std::vector<std::unique_ptr<buffer_t>> buffers_t;

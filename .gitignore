@@ -133,6 +133,9 @@ test_scatter_gather
 test_socketopt_hwm
 test_use_fd_ipc
 test_use_fd_tcp
+test_lz4_reqrep_across_device
+test_lz4_reqrep_device
+test_lz4_reqrep_thru_device
 test_pub_invert_matching
 test_dgram
 test_base85
