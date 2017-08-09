@@ -740,6 +740,29 @@ test_reqrep_vmci_CXXFLAGS = @LIBZMQ_VMCI_CXXFLAGS@
 
 endif
 
+if HAVE_LZ4
+test_apps += \
+	tests/test_lz4_reqrep_device \
+	tests/test_lz4_reqrep_across_device \
+	tests/test_lz4_reqrep_thru_device
+
+# rep/req compressed
+# router/delaer device compressed
+tests_test_lz4_reqrep_device_SOURCES = tests/test_lz4_reqrep_device.cpp
+tests_test_lz4_reqrep_device_LDADD = src/libzmq.la
+
+# rep/req compressed
+# router/delaer device uncompressed
+tests_test_lz4_reqrep_across_device_SOURCES = tests/test_lz4_reqrep_across_device.cpp
+tests_test_lz4_reqrep_across_device_LDADD = src/libzmq.la
+
+# rep/req uncompressed
+# router/delaer device compressed
+tests_test_lz4_reqrep_thru_device_SOURCES = tests/test_lz4_reqrep_thru_device.cpp
+tests_test_lz4_reqrep_thru_device_LDADD = src/libzmq.la
+
+endif
+
 if ENABLE_DRAFTS
 test_apps += tests/test_poller \
 	tests/test_client_server \

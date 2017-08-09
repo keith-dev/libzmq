@@ -401,7 +401,7 @@ void zmq::print_backtrace (void)
     unw_init_local (&cursor, &ctx);
 
     while (unw_step (&cursor) > 0) {
-        unw_word_t offset;
+        unw_word_t offset = 0;
         unw_proc_info_t p_info;
         const char *file_name;
         char *demangled_name;

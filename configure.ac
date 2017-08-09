@@ -530,6 +530,34 @@ else
     AC_MSG_RESULT([no])
 fi
 
+# This uses "--with-lz4" to point to the "lz4" directory
+# for "lz4/include" and "lz4/lib"
+#(if "--with-lz4=yes" is given, then assume installed on system)
+AC_ARG_WITH([lz4],
+    [AS_HELP_STRING([--with-lz4],
+        [build libzmq with lz4 encryption, optionally specifying lz4 path [default=no]])],
+    [with_lz4_ext=$withval],
+    [with_lz4_ext=no])
+
+AC_MSG_CHECKING("with_lz4_ext = ${with_lz4_ext}")
+
+AM_CONDITIONAL(HAVE_LZ4, test "x$with_lz4_ext" != "xno")
+
+if test "x$with_lz4_ext" != "xno"; then
+    AC_MSG_RESULT([yes])
+    AC_DEFINE(ZMQ_HAVE_LZ4, 1, [Have lz4 encryption])
+
+    if test "x$with_lz4_ext" != "xyes"; then
+        lz4_path="${with_lz4_ext}"
+        LIBZMQ_EXTRA_CXXFLAGS="-I${lz4_path}/include ${LIBZMQ_EXTRA_CXXFLAGS}"
+        LIBZMQ_EXTRA_LDFLAGS="-L${lz4_path}/lib ${LIBZMQ_EXTRA_LDFLAGS}"
+    fi
+    LIBS="-L${lz4_path}/lib -llz4 $LIBS"
+    PKGCFG_LIBS_PRIVATE="$PKGCFG_LIBS_PRIVATE -llz4"
+else
+    AC_MSG_RESULT([no])
+fi
+
 # build using vmci
 have_vmci_library="no"
 
