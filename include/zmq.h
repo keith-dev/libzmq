@@ -267,6 +267,7 @@ ZMQ_EXPORT const char *zmq_msg_gets (const zmq_msg_t *msg_,
 #define ZMQ_XPUB 9
 #define ZMQ_XSUB 10
 #define ZMQ_STREAM 11
+#define ZMQ_RAW 12
 
 /*  Deprecated aliases                                                        */
 #define ZMQ_XREQ ZMQ_DEALER
