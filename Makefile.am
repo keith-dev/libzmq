@@ -170,6 +170,8 @@ src_libzmq_la_SOURCES = \
 	src/radix_tree.hpp \
 	src/random.cpp \
 	src/random.hpp \
+	src/raw.cpp \
+	src/raw.hpp \
 	src/raw_decoder.cpp \
 	src/raw_decoder.hpp \
 	src/raw_encoder.cpp \
@@ -454,6 +456,7 @@ test_apps = \
 	tests/test_term_endpoint \
 	tests/test_srcfd \
 	tests/test_monitor \
+	tests/test_raw \
 	tests/test_router_mandatory \
 	tests/test_router_mandatory_hwm \
 	tests/test_router_handover \
